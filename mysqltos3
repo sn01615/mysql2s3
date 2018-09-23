@@ -1,0 +1,81 @@
+#!/bin/sh
+
+# Updates etc at: https://github.com/woxxy/MySQL-backup-to-Amazon-S3
+# Under a MIT license
+
+# 保留3天备份，可以设置每天3点备份
+
+# change these variables to what you need
+MYSQLROOT=username
+MYSQLPASS=password
+S3BUCKET=mysql-backup
+# DATABASE='--all-databases'
+DATABASE=${1-vote}
+FILENAME=${DATABASE}
+HOST=master
+DUMPOPTION='--quick --single-transaction'
+# the following line prefixes the backups with the defined directory. it must be blank or end with a /
+S3PATH=mysql-backup/${DATABASE}
+# when running via cron, the PATHs MIGHT be different. If you have a custom/manual MYSQL install, you should set this manually like MYSQLDUMPPATH=/usr/local/mysql/bin/
+MYSQLDUMPPATH=
+#tmp path.
+TMP_PATH=/youlocalbackupdir/
+
+DATESTAMP=$(date "+.%Y-%m-%d.%H:%M:%S")
+DELDATESTAMP=$(date -d"3 day ago" "+.%Y-%m-%d")
+DAY=$(date +"%d")
+DAYOFWEEK=$(date +"%A")
+
+PERIOD=${2-day}
+if [ ${PERIOD} = "auto" ]; then
+    if [ ${DAY} = "01" ]; then
+        PERIOD=month
+    elif [ ${DAYOFWEEK} = "Sunday" ]; then
+        PERIOD=week
+    else
+        PERIOD=day
+    fi
+fi
+
+echo "Selected period: $PERIOD."
+
+echo "Starting backing up the database to a .gz file..."
+
+# dump all databases
+${MYSQLDUMPPATH}mysqldump -h${HOST} ${DUMPOPTION} --user=${MYSQLROOT} --password=${MYSQLPASS} ${DATABASE} | gzip > ${TMP_PATH}${FILENAME}.gz
+
+echo "Done backing up the database to a file."
+# echo "Starting compression..."
+
+# tar czf ${TMP_PATH}${FILENAME}${DATESTAMP}.tar.gz ${TMP_PATH}${FILENAME}.sql
+mv ${TMP_PATH}${FILENAME}.gz ${TMP_PATH}${FILENAME}${DATESTAMP}.gz
+
+# echo "Done compressing the backup file."
+
+# upload all databases
+echo "Uploading the new backup..."
+s3cmd put -f --check-md5 -s --continue-put ${TMP_PATH}${FILENAME}${DATESTAMP}.gz s3://${S3BUCKET}/${S3PATH}${PERIOD}/ > ~/s3put.log
+echo "New backup uploaded."
+if [ $? -ne 0 ]
+then
+    echo "Re uploading the backup file..."
+    s3cmd put -f --check-md5 -s --continue-put ${TMP_PATH}${FILENAME}${DATESTAMP}.gz s3://${S3BUCKET}/${S3PATH}${PERIOD}/ > ~/s3put.log
+    echo "Re upload backup file done."
+fi
+
+echo "Moving the backup from past $PERIOD to another folder..."
+s3cmd mv --recursive s3://${S3BUCKET}/${S3PATH}${PERIOD}/${FILENAME}${DELDATESTAMP} s3://${S3BUCKET}/${S3PATH}previous_${PERIOD}/
+echo s3cmd mv --recursive s3://${S3BUCKET}/${S3PATH}${PERIOD}/${FILENAME}${DELDATESTAMP} s3://${S3BUCKET}/${S3PATH}previous_${PERIOD}/
+echo "Past backup moved."
+
+# we want at least two backups, two months, two weeks, and two days
+echo "Removing old backup (7 ${PERIOD}s ago)..."
+s3cmd del --recursive s3://${S3BUCKET}/${S3PATH}previous_${PERIOD}/
+echo "Old backup removed."
+
+# # remove databases dump
+# # rm ${TMP_PATH}${FILENAME}.sql
+# echo "Removing the gz files..."
+# rm ${TMP_PATH}${FILENAME}${DATESTAMP}.gz
+# echo "Files removed."
+echo "All done."
